@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1a1a2e">
+<title>手机录制器</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(160deg, #1a1a2e 0%, #16213e 100%);
+    color: #eee; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 24px 20px;
+  }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: #8a8fb0; margin-bottom: 28px; text-align: center; }
+  .timer {
+    font-size: 56px; font-weight: 200; font-variant-numeric: tabular-nums;
+    margin: 10px 0 24px; letter-spacing: 2px;
+  }
+  .dot {
+    display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+    background: #555; margin-right: 10px; vertical-align: middle;
+  }
+  .dot.on { background: #ff4d4f; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .btns { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 360px; }
+  button {
+    border: none; border-radius: 14px; padding: 18px;
+    font-size: 17px; font-weight: 600; color: #fff; cursor: pointer;
+    transition: transform .1s, opacity .2s;
+  }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .35; }
+  .b-video { background: linear-gradient(135deg, #2e6de8, #5a3fd8); }
+  .b-audio { background: linear-gradient(135deg, #1fa055, #159b6b); }
+  .b-stop  { background: linear-gradient(135deg, #d9363e, #b02030); }
+  .result { width: 100%; max-width: 360px; margin-top: 24px; }
+  .result a {
+    display: block; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15);
+    border-radius: 12px; padding: 14px 16px; margin-top: 10px; color: #7db8ff;
+    text-decoration: none; font-size: 14px; word-break: break-all;
+  }
+  video.preview { width: 100%; max-width: 360px; border-radius: 14px; margin-top: 20px; background: #000; }
+  .tip { margin-top: 26px; font-size: 12px; color: #6d7292; line-height: 1.8; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>📱 手机录制器</h1>
+  <div class="sub">网页版 · 录像 / 录音 · 文件自动保存到下载</div>
+
+  <div class="timer"><span class="dot" id="dot"></span><span id="timer">00:00</span></div>
+
+  <div class="btns">
+    <button class="b-video" id="btnVideo">🎥 开始录像（画面 + 声音）</button>
+    <button class="b-audio" id="btnAudio">🎙️ 开始录音（仅声音）</button>
+    <button class="b-stop" id="btnStop" disabled>⏹️ 停止并保存</button>
+  </div>
+
+  <video class="preview" id="preview" playsinline muted></video>
+  <div class="result" id="result"></div>
+
+  <div class="tip">
+    提示：首次使用会请求摄像头/麦克风权限，请点「允许」。<br>
+    想当 App 用？用手机浏览器菜单里的「添加到主屏幕」。<br>
+    注意：网页版锁屏后可能被浏览器暂停，长时间后台录制请用 APK 版。
+  </div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let stream = null, recorder = null, chunks = [], timerInt = null, t0 = 0, wakeLock = null;
+
+  function pickMime(withVideo) {
+    if (withVideo) {
+      for (const m of ['video/mp4;codecs=avc1,mp4a', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'])
+        if (MediaRecorder.isTypeSupported(m)) return m;
+    } else {
+      for (const m of ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'])
+        if (MediaRecorder.isTypeSupported(m)) return m;
+    }
+    return '';
+  }
+
+  function fmt(s) {
+    const m = String(Math.floor(s / 60)).padStart(2, '0');
+    return m + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  async function keepAwake() {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+
+  async function start(withVideo) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(
+        withVideo ? { video: { width: 1280, height: 720 }, audio: true } : { audio: true });
+    } catch (e) {
+      alert('无法获取权限：' + e.message + '\n请检查浏览器是否已授权摄像头/麦克风。');
+      return;
+    }
+    const mime = pickMime(withVideo);
+    chunks = [];
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = save;
+    recorder.start(1000);
+
+    if (withVideo) { $('preview').srcObject = stream; $('preview').style.display = 'block'; }
+    keepAwake();
+
+    t0 = Date.now();
+    timerInt = setInterval(() => $('timer').textContent = fmt(Math.floor((Date.now() - t0) / 1000)), 500);
+    $('dot').classList.add('on');
+    $('btnVideo').disabled = $('btnAudio').disabled = true;
+    $('btnStop').disabled = false;
+  }
+
+  function stop() {
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    stream && stream.getTracks().forEach(t => t.stop());
+    clearInterval(timerInt);
+    wakeLock && wakeLock.release();
+    $('dot').classList.remove('on');
+    $('preview').style.display = 'none';
+    $('btnVideo').disabled = $('btnAudio').disabled = false;
+    $('btnStop').disabled = true;
+  }
+
+  function save() {
+    const type = recorder.mimeType || 'video/webm';
+    const ext = type.includes('mp4') ? 'mp4' : (type.includes('audio') ? 'm4a' : 'webm');
+    const ts = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
+    const blob = new Blob(chunks, { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'REC_' + ts + '.' + ext;
+    a.textContent = '⬇️ 点击保存 ' + a.download + '（' + (blob.size / 1048576).toFixed(1) + ' MB）';
+    $('result').prepend(a);
+  }
+
+  $('btnVideo').onclick = () => start(true);
+  $('btnAudio').onclick = () => start(false);
+  $('btnStop').onclick = stop;
+</script>
+</body>
+</html>
